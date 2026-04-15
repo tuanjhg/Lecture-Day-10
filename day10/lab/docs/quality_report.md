@@ -1,6 +1,6 @@
 # Quality Report — Lab Day 10: Data Pipeline & Data Observability
 
-**run_id (pipeline chuẩn):** `(điền sau khi chạy pipeline)`  
+**run_id (pipeline chuẩn):** `good`  
 **run_id (inject bad):** `inject-bad`  
 **Ngày:** 2026-04-15  
 **Tác giả:** Nguyễn Hoàng Long (2A202600160) + Hải (Quality team)
@@ -11,14 +11,14 @@
 
 | Chỉ số | Before (inject bad) | After (pipeline chuẩn) | Ghi chú |
 |--------|-------------------|----------------------|---------|
-| raw_records | 16 | 16 | Cùng CSV input |
-| cleaned_records | _(điền sau run)_ | _(điền sau run)_ | Sau clean: expect ~7 records sạch |
-| quarantine_records | _(điền)_ | _(điền)_ | Inject mode ít quarantine hơn (skip validate) |
-| Expectation halt? | YES (E3: refund_no_stale_14d) | NO | Inject bypass halt với `--skip-validate` |
-| hits_forbidden (q_refund_window) | **yes** | **no** | Chunk "14 ngày" còn trong index khi inject |
-| contains_expected (q_refund_window) | yes | yes | Chunk "7 ngày" vẫn có, nhưng stale chunk gây forbidden hit |
+| raw_records | 15 | 15 | `data/raw/policy_export_dirty.csv` |
+| cleaned_records | 7 | 7 | Xem `artifacts/cleaned/cleaned_inject-bad.csv` và `artifacts/cleaned/cleaned_good.csv` |
+| quarantine_records | 7 | 7 | Xem `artifacts/quarantine/quarantine_inject-bad.csv` và `artifacts/quarantine/quarantine_good.csv` |
+| Expectation halt? | YES (E3 fail, violations=1) | NO | Inject bypass halt với `--skip-validate` |
+| hits_forbidden (q_refund_window) | **yes** | **no** | Inject giữ chunk "14 ngày" trong top-k; pipeline chuẩn fix/prune |
+| contains_expected (q_refund_window) | yes | yes | Cả hai đều retrieve được "7 ngày" |
 
-> **Interpretation:** Khi chạy inject mode (`--no-refund-fix --skip-validate`), chunk stale "14 ngày" từ v3 migration KHÔNG bị quarantine → lọt vào ChromaDB → `eval_retrieval` phát hiện `hits_forbidden=yes`. Sau khi chạy pipeline chuẩn (fix refund + validate), chunk stale bị quarantine, prune khỏi index → `hits_forbidden=no`.
+> **Interpretation:** Inject mode (`--no-refund-fix --skip-validate`) cố ý giữ chunk stale "14 ngày làm việc" để pipeline vẫn embed và eval quan sát được `hits_forbidden=yes`. Pipeline chuẩn (auto-fix refund 14→7 + expectation pass) tạo index sạch hơn nên `hits_forbidden=no`.
 
 ---
 
@@ -51,9 +51,9 @@ hits_forbidden: no ← chunk "14 ngày" đã bị quarantine + prune
 **Before (inject-bad, không filter HR version):**
 ```
 id: q_leave_version
-contains_expected: có thể yes (chunk "12 ngày" tồn tại)
-hits_forbidden: CÓ THỂ YES nếu chunk "10 ngày phép năm" (HR 2025) chưa bị loại
-top1_doc_expected: uncertain
+contains_expected: yes
+hits_forbidden: no
+top1_doc_expected: yes
 ```
 
 **After (pipeline chuẩn):**
@@ -64,24 +64,23 @@ hits_forbidden: no ("10 ngày phép năm" đã bị quarantine vì effective_dat
 top1_doc_expected: yes (doc_id = hr_leave_policy)
 ```
 
-> **Note:** Điền số liệu thực sau khi chạy `python eval_retrieval.py`. Dữ liệu trên là dự đoán dựa trên cleaning rules.
+> **Note:** Kết quả thực được lấy từ `artifacts/eval/after_inject_bad.csv` và `artifacts/eval/before_after_eval.csv`.
 
 ---
 
 ## 3. Freshness & Monitor
 
-**SLA chọn:** 24 giờ (per contract v2.0 :: freshness.primary_sla.sla_hours)  
-**Grace period:** 2 giờ  
-**Boundary đo:** Dual — ingest (exported_at) + publish (run_timestamp)
+**SLA chọn:** 24 giờ (từ `FRESHNESS_SLA_HOURS`)  
+**Grace period:** 2 giờ (default trong monitor)  
+**Boundary đo (pipeline hiện tại):** Ingest freshness theo `latest_exported_at` trong manifest
 
 **Kết quả trên data mẫu:**
 
 | Boundary | Status | age_hours | Giải thích |
 |----------|--------|-----------|-----------|
-| Ingest | FAIL | >100h | `exported_at = 2026-04-10T08:00:00` — data export cũ nhiều ngày |
-| Publish | PASS | <1h | `run_timestamp` = thời điểm chạy pipeline (vừa mới) |
+| Ingest (latest_exported_at) | FAIL | ~121h | `latest_exported_at = 2026-04-10T08:00:00` (data export cũ so với SLA 24h) |
 
-**Interpretation:** FAIL tại ingest boundary là **hành vi đúng** — CSV mẫu cố ý có timestamp cũ để dạy freshness. Trong production: (1) cập nhật CSV mới hơn, hoặc (2) chỉnh SLA cho phù hợp use case (snapshot data có thể accept lag hơn streaming).
+**Interpretation:** FAIL tại ingest boundary là **hành vi đúng** — CSV mẫu cố ý có timestamp cũ để dạy freshness. Trong production: (1) cập nhật export mới hơn, hoặc (2) chỉnh SLA phù hợp với loại dữ liệu (snapshot có thể SLA dài hơn).
 
 **Alert escalation:** WARN > 19.2h → FAIL > 24h → CRITICAL > 26h (escalate to Lead).
 
@@ -106,10 +105,10 @@ top1_doc_expected: yes (doc_id = hr_leave_policy)
 
 | Metric | Inject bad | Pipeline chuẩn | Delta |
 |--------|-----------|---------------|-------|
-| quarantine_stale_refund_window | 0 (bypassed) | 1 | +1 quarantine |
 | expectation E3 | FAIL (skipped) | OK | Fixed |
 | hits_forbidden (q_refund) | yes | no | ✅ Fixed |
-| embed_prune_removed | 0 | ≥1 | Prune stale chunk |
+| cleaned_refund_window_fixed (metric) | 0 | 1 | Auto-fix bật trong pipeline chuẩn |
+| embed_prune_removed (log) | 7 | (khác run) | Index snapshot: prune id không còn trong cleaned |
 
 ---
 
