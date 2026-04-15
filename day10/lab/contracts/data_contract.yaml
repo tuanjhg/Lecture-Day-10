@@ -1,112 +1,392 @@
-# Data contract — Lab Day 10 (tiếp nối artifact CS + IT Helpdesk)
-# Sinh viên bổ sung owner, SLA freshness, và nguồn canonical.
+# ============================================================
+# Data Contract — Lab Day 10: Data Pipeline & Data Observability
+# Tiếp nối artifact CS + IT Helpdesk (Day 08 → 09 → 10)
+# ============================================================
+# Owner: Long (Quality & Observability)
+# Created: 2026-04-15
+# Last modified: 2026-04-15
+# Reviewed by: Hải (Quality), Dũng (Lead)
+# ============================================================
 
-version: "1.0"
+# ── Metadata ──────────────────────────────────────────────────
+contract_metadata:
+  version: "2.0"
+  previous_version: "1.0"
+  created_at: "2026-04-15T09:00:00+07:00"
+  updated_at: "2026-04-15T15:00:00+07:00"
+  author: "Long"
+  status: "active"           # draft | active | deprecated
+  review_cycle: "weekly"
+  changelog:
+    - version: "1.0"
+      date: "2026-04-15"
+      note: "Baseline khởi tạo từ lab scaffold"
+    - version: "2.0"
+      date: "2026-04-15"
+      note: "Sprint 1-2: bổ sung metadata, dual-boundary freshness, alert escalation, data lineage, monitoring config"
+
+# ── Dataset Identity ──────────────────────────────────────────
 dataset: "kb_chunk_export"
-owner_team: "Data Platform & Policy Team"
-owner_contact: "data-platform@internal.com"
+description: >
+  Bộ dữ liệu chunk text từ các tài liệu chính sách CS + IT Helpdesk,
+  được ingest từ CSV export, clean, validate rồi embed vào ChromaDB
+  phục vụ RAG Agent (Day 08-09).
+domain: "Customer Service & IT Helpdesk"
+classification: "internal"     # public | internal | confidential | restricted
 
+# ── Ownership ─────────────────────────────────────────────────
+ownership:
+  owner_team: "Quality & Observability Team"
+  owner_primary: "Long"
+  owner_secondary: "Hải"
+  lead_integrator: "Dũng"
+  contact_email: "data-platform@internal.com"
+  escalation_contact: "Dũng (Lead)"
+  stakeholders:
+    - team: "Transformation Team"
+      members: ["Tuấn", "Quang"]
+      responsibility: "Cung cấp dữ liệu sạch, inject corruption scenarios"
+    - team: "Vector DB Team"
+      member: "Thuận"
+      responsibility: "ChromaDB setup, idempotent upsert, pruning"
+    - team: "Evaluation Team"
+      member: "Huy"
+      responsibility: "Retrieval eval, before/after evidence"
+
+# ── Schema Cleaned ────────────────────────────────────────────
 schema_cleaned:
   chunk_id:
     type: string
     required: true
-    description: "ID ổn định sau clean (thường hash hoặc doc_id + seq)"
+    description: "ID ổn định sau clean: {doc_id}_{seq}_{hash[:16]}. Dùng làm key upsert ChromaDB"
+    pattern: "^[a-z0-9_]+_\\d+_[a-f0-9]{16}$"
   doc_id:
     type: string
     required: true
-    description: "Khóa logic tài liệu nguồn (vd policy_refund_v4)"
+    description: "Khóa logic tài liệu nguồn — phải nằm trong allowed_doc_ids"
+    enum: ["policy_refund_v4", "sla_p1_2026", "it_helpdesk_faq", "hr_leave_policy"]
   chunk_text:
     type: string
     required: true
     constraints:
       min_length: 8
+      encoding: "UTF-8"
+    description: "Nội dung text chunk; đã trim whitespace, normalize unicode"
   effective_date:
     type: date
     required: true
+    format: "YYYY-MM-DD (ISO 8601)"
+    description: "Ngày hiệu lực chính sách — dùng cho version resolution"
   exported_at:
     type: datetime
     required: true
+    format: "ISO 8601 (UTC)"
+    description: "Timestamp từ nguồn export — không modify, dùng cho freshness check"
 
+# ── Quality Rules ─────────────────────────────────────────────
+# Mapping 1:1 với cleaning_rules.py và expectations.py
 quality_rules:
-  - id: "no_duplicate_chunk_text"
+  - id: "no_duplicate_chunk_id"
+    description: "Dedup by chunk_id; giữ latest by exported_at, DROP tất cả records cũ"
     severity: "warn"
+    action: "DROP duplicates, keep latest"
+    metric: "dropped_duplicate_chunk_id"
+
+  - id: "no_duplicate_chunk_text"
+    description: "Semantic dedup by normalized chunk_text; giữ first occurrence"
+    severity: "warn"
+    action: "DROP duplicates after first"
+    metric: "dropped_duplicate_chunk_text"
+
   - id: "no_stale_refund_window"
     description: "Không được để chunk policy refund chứa cửa sổ 14 ngày (lệch so với v4 = 7 ngày)"
     severity: "halt"
+    action: "QUARANTINE + HALT pipeline"
+    metric: "quarantine_stale_refund_window"
+    remediation: "Fix 14→7 ngày trong cleaning_rules (apply_refund_window_fix=True)"
+
   - id: "empty_chunk_text"
     description: "chunk_text phải có độ dài >= 8 ký tự; NULL hoặc empty → DROP"
     severity: "error"
+    action: "QUARANTINE"
+    metric: "quarantine_empty_chunk_text, quarantine_short_chunk_text"
+
   - id: "unknown_doc_id"
     description: "doc_id phải trong allowed_doc_ids; unknown → QUARANTINE"
     severity: "error"
+    action: "QUARANTINE"
+    metric: "quarantine_unknown_doc_id"
+    approval: "Data Owner verify source + metadata trước khi merge"
+
   - id: "missing_effective_date"
     description: "effective_date không được NULL; missing → QUARANTINE"
     severity: "error"
+    action: "QUARANTINE"
+    metric: "quarantine_missing_effective_date"
+
   - id: "invalid_date_format"
     description: "effective_date phải ISO 8601 (YYYY-MM-DD) hoặc DD/MM/YYYY (parse); invalid → QUARANTINE"
     severity: "error"
-  - id: "duplicate_chunk_id"
-    description: "Dedup by chunk_id; giữ latest by exported_at, DROP tất cả records cũ"
+    action: "QUARANTINE"
+    metric: "quarantine_invalid_date_format"
+    note: "DD/MM/YYYY tự động parse sang ISO; các format khác (DD-MM-YYYY, etc.) → quarantine"
+
+  - id: "stale_hr_policy"
+    description: "HR leave policy với effective_date < 2026-01-01 là bản cũ → QUARANTINE"
+    severity: "error"
+    action: "QUARANTINE"
+    metric: "quarantine_stale_hr_policy"
+
+  # ── 3 rules mới (Sprint 2 — Long & Hải) ──
+  - id: "no_bom_encoding"
+    description: "Phát hiện BOM (Byte Order Mark) hoặc ký tự control trong chunk_text → QUARANTINE"
+    severity: "error"
+    action: "QUARANTINE"
+    metric: "quarantine_bom_encoding"
+    note: "BOM UTF-8 (\\xef\\xbb\\xbf) gây lỗi embedding distance; control chars gây parse error"
+
+  - id: "no_excessive_whitespace"
+    description: "chunk_text có >3 khoảng trắng liên tiếp hoặc >2 newline liên tiếp → normalize + WARN"
     severity: "warn"
+    action: "NORMALIZE (collapse whitespace)"
+    metric: "cleaned_excessive_whitespace_fixed"
+    note: "Whitespace thừa làm embedding distance bị lệch; cùng nội dung nhưng vector khác"
 
+  - id: "exported_at_not_future"
+    description: "exported_at không được là thời điểm trong tương lai (> now + 1h) → QUARANTINE"
+    severity: "error"
+    action: "QUARANTINE"
+    metric: "quarantine_future_exported_at"
+    note: "exported_at tương lai cho thấy data đã bị tamper hoặc clock drift nghiêm trọng"
+
+# ── Freshness SLA ─────────────────────────────────────────────
+# Sprint 2: Dual-boundary freshness monitoring (ingest + publish)
 freshness:
-  measured_at: "publish"  # ingest | cleaned | publish
-  sla_hours: 24
-  alert_channel: "#data-quality-alerts"
-  grace_period_hours: 2
+  # Boundary 1: Ingest — dữ liệu đã được đọc từ source
+  ingest_boundary:
+    measured_at: "ingest"
+    description: "Thời điểm raw CSV được đọc vào pipeline (log: raw_records)"
+    sla_hours: 24
+    metric: "ingest_timestamp"
 
+  # Boundary 2: Publish — dữ liệu đã embed vào ChromaDB (agent có thể truy cập)
+  publish_boundary:
+    measured_at: "publish"
+    description: "Thời điểm vectors upsert thành công vào ChromaDB (log: embed_upsert)"
+    sla_hours: 24
+    metric: "publish_timestamp"
+
+  # SLA chính (end-to-end: từ exported_at → publish)
+  primary_sla:
+    sla_hours: 24
+    grace_period_hours: 2
+    description: >
+      Dữ liệu phải được publish lên vector store trong vòng 24h (+ 2h grace)
+      kể từ exported_at trong source. Nếu vượt → FAIL.
+
+  # Alert configuration
+  alert:
+    channel: "#data-quality-alerts"
+    escalation:
+      - level: "WARN"
+        condition: "age_hours > sla_hours * 0.8"
+        action: "Notify team channel"
+        description: "Cảnh báo sớm khi dữ liệu sắp hết SLA (>80% thời gian)"
+      - level: "FAIL"
+        condition: "age_hours > sla_hours"
+        action: "Page on-call + create incident ticket"
+        description: "SLA vi phạm — data stale, agent có thể trả sai"
+      - level: "CRITICAL"
+        condition: "age_hours > sla_hours + grace_period_hours"
+        action: "Escalate to Lead (Dũng) + rollback to last known good"
+        description: "Vượt cả grace period — cần rollback embed hoặc tạm banner"
+
+# ── Canonical Sources ─────────────────────────────────────────
 canonical_sources:
   - path: "data/docs/policy_refund_v4.txt"
     doc_id: "policy_refund_v4"
+    description: "Chính sách hoàn tiền v4 — canonical: 7 ngày làm việc"
   - path: "data/docs/sla_p1_2026.txt"
     doc_id: "sla_p1_2026"
+    description: "SLA ticket P1: phản hồi 15 phút, resolution 4 giờ"
   - path: "data/docs/it_helpdesk_faq.txt"
     doc_id: "it_helpdesk_faq"
+    description: "FAQ IT Helpdesk: login, password, account lockout"
   - path: "data/docs/hr_leave_policy.txt"
     doc_id: "hr_leave_policy"
+    description: "Chính sách nghỉ phép 2026: 12 ngày phép năm"
+  - path: "data/docs/access_control_sop.txt"
+    doc_id: "access_control_sop"
+    description: "SOP kiểm soát truy cập — có trong docs nhưng chưa trong CSV export"
+    status: "available_not_ingested"
 
-# Baseline allowlist export — nhóm mở rộng doc mới phải đồng bộ cleaning_rules + contract.
+# ── Allowlist ─────────────────────────────────────────────────
 allowed_doc_ids:
   - policy_refund_v4
   - sla_p1_2026
   - it_helpdesk_faq
   - hr_leave_policy
 
-# Sources from raw data NOT in allowlist — tự động quarantine
+# ── Rejected Sources ──────────────────────────────────────────
 rejected_sources:
-  - legacy_catalog_xyz_zzz:
-      reason: "Unknown/deprecated legacy system; not in approved list"
-      action: "QUARANTINE all records"
-      approval_required: "Data Owner verify source + metadata"
+  - source_id: "legacy_catalog_xyz_zzz"
+    reason: "Unknown/deprecated legacy system; không trong approved list"
+    action: "QUARANTINE all records"
+    approval_required: "Data Owner verify source + metadata"
+  - source_id: "unknown_security_doc"
+    reason: "Tài liệu security không được phê duyệt cho Knowledge Base"
+    action: "QUARANTINE all records"
+    approval_required: "Security Team + Data Owner review"
+
+# ── Policy Versioning ─────────────────────────────────────────
 policy_versioning:
   hr_leave_min_effective_date: "2026-01-01"
-  refund_window_canonical: "7_days"  # v4 canonical; v3 "14 days" → quarantine
+  refund_window_canonical: "7_days"     # v4 canonical; v3 "14 days" → quarantine
+  refund_window_stale: "14_days"        # v3 — migration lỗi, phải quarantine
+  version_check_enabled: true
 
 version_resolution:
   rule: "Select newest by effective_date (tie-breaker: latest exported_at)"
   examples:
     hr_leave_2_versions: "row 7 (2025-01-01, 10 days) vs row 8 (2026-02-01, 12 days) → keep row 8 only"
     refund_stale_chunk: "chunk_id=3 (14 days from v3 migration) → QUARANTINE + HALT"
+    hr_leave_stale_2024: "row 13 (2024-12-31) → quarantine (effective_date < 2026-01-01)"
 
+# ── Source SLA ────────────────────────────────────────────────
+# Freshness SLA riêng cho từng nguồn (Sprint 2 — Long)
 source_sla:
   policy_refund_v4:
     refresh_frequency: "daily"
     lag_tolerance_hours: 12
     owner: "Policy Team"
+    validation: "Check '14 ngày' giảm → 0 quarantine_records"
+    priority: "high"        # Ảnh hưởng trực tiếp đến câu trả lời refund
+
   hr_leave_policy:
     refresh_frequency: "monthly"
     lag_tolerance_hours: 48
     owner: "HR Team"
+    validation: "Verify effective_date >= 2026-01-01; only 2026 version active"
+    priority: "medium"
+
   it_helpdesk_faq:
     refresh_frequency: "weekly"
     lag_tolerance_hours: 24
     owner: "IT Service Desk"
+    validation: "Freshness check: exported_at within 7 days"
+    priority: "medium"
+
   sla_p1_2026:
     refresh_frequency: "static"
-    lag_tolerance_hours: 720
+    lag_tolerance_hours: 720      # 30 ngày — policy ít đổi
     owner: "Service Management Team"
+    validation: "Manual review; no automation required"
+    priority: "low"
+
+# ── Data Lineage ──────────────────────────────────────────────
+# Sprint 2: Tracing data flow end-to-end (Long)
+data_lineage:
+  pipeline_stages:
+    - stage: "ingest"
+      input: "data/raw/policy_export_dirty.csv"
+      output: "in-memory raw rows"
+      tracked_by: "run_id, raw_records count"
+
+    - stage: "clean"
+      input: "raw rows"
+      output: "artifacts/cleaned/cleaned_<run_id>.csv"
+      tracked_by: "run_id, cleaned_records count, cleaning metrics"
+      rules_applied: "cleaning_rules.py (8 baseline + 3 new rules)"
+
+    - stage: "quarantine"
+      input: "rejected rows from clean stage"
+      output: "artifacts/quarantine/quarantine_<run_id>.csv"
+      tracked_by: "run_id, quarantine_records count, quarantine reasons"
+
+    - stage: "validate"
+      input: "cleaned rows"
+      output: "expectation results (pass/fail)"
+      tracked_by: "run_id, expectation results, halt decision"
+      rules_applied: "expectations.py (6 baseline expectations)"
+
+    - stage: "embed"
+      input: "cleaned CSV (post-validation)"
+      output: "ChromaDB collection (day10_kb)"
+      tracked_by: "run_id, embed_upsert count, embed_prune_removed"
+      idempotency: "upsert by chunk_id + prune stale vectors"
+
+    - stage: "publish"
+      input: "ChromaDB vectors"
+      output: "manifest JSON + freshness check result"
+      tracked_by: "run_id, manifest path, freshness_check status"
+
+  traceability:
+    run_id_format: "YYYY-MM-DDTHH-MMZ (UTC) hoặc custom string"
+    artifacts_per_run:
+      - "artifacts/logs/run_<run_id>.log"
+      - "artifacts/cleaned/cleaned_<run_id>.csv"
+      - "artifacts/quarantine/quarantine_<run_id>.csv"
+      - "artifacts/manifests/manifest_<run_id>.json"
+
+# ── Monitoring Configuration ──────────────────────────────────
+# Sprint 2: Khai báo metrics và alerts (Long)
+monitoring:
+  freshness_check:
+    script: "monitoring/freshness_check.py"
+    trigger: "after each pipeline run + scheduled hourly"
+    input: "artifacts/manifests/manifest_<run_id>.json"
+    thresholds:
+      pass: "age_hours <= sla_hours"
+      warn: "sla_hours < age_hours <= sla_hours + grace_period_hours"
+      fail: "age_hours > sla_hours + grace_period_hours"
+
+  key_metrics:
+    - name: "freshness_age_hours"
+      description: "Số giờ từ exported_at tới now"
+      alert_threshold: 24
+
+    - name: "quarantine_records_count"
+      description: "Số records bị quarantine trong run hiện tại"
+      alert_threshold: 0             # Bất kỳ quarantine nào cũng cần review
+      alert_type: "warn"
+
+    - name: "expectation_halt_count"
+      description: "Số expectation severity=halt bị fail"
+      alert_threshold: 0
+      alert_type: "halt"
+
+    - name: "embed_prune_removed"
+      description: "Số vectors bị xóa khỏi ChromaDB (stale)"
+      alert_threshold: 5             # >5 prune cho thấy data drift đáng kể
+      alert_type: "warn"
+
+    - name: "cleaned_vs_raw_ratio"
+      description: "Tỷ lệ cleaned/raw — giảm đột ngột = data quality issue"
+      alert_threshold_min: 0.5       # <50% → investigate
+      alert_type: "warn"
+
+# ── Governance & Approval ─────────────────────────────────────
+governance:
+  quarantine_review:
+    frequency: "weekly"
+    reviewer: "Data Owner (Long/Hải)"
+    location: "artifacts/quarantine/quarantine_<run_id>.csv"
+    process: |
+      1. Review quarantine CSV — xem lý do từng record
+      2. Phân loại: fix được (date format) vs không fix được (unknown source)
+      3. Records fix được → backfill vào cleaned + rerun
+      4. Records không fix → archive + ghi incident log
+      5. Cập nhật contract nếu phát sinh source/rule mới
+
+  contract_update:
+    trigger: "Khi thêm source mới, đổi schema, hoặc phát sinh incident"
+    process: |
+      1. Cập nhật data_contract.yaml (version bump)
+      2. Sync cleaning_rules.py + expectations.py (nếu thêm rule)
+      3. Sync docs/data_contract.md (mô tả chi tiết)
+      4. Review với Lead (Dũng) trước merge
 
 # Detailed governance & quarantine rules → see docs/data_contract.md (Sections 3–4)
-# - Quarantine process: Section 3 (7 rules, approval workflow)
+# - Quarantine process: Section 3 (7+ rules, approval workflow)
 # - Canonical versioning: Section 4.2 (version conflicts resolution)
 # - Freshness SLA & validation: Section 4.3
