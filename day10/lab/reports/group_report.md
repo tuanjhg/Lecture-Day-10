@@ -26,7 +26,7 @@
 
 ## 1. Pipeline tổng quan (~180 từ)
 
-> Nguồn raw: `data/raw/policy_export_dirty.csv` — 16 records, 6 doc_id, nhiều lỗi cố ý (duplicate, unknown source, stale version, empty text, BOM, date format inconsistency).
+> Nguồn raw: `data/raw/policy_export_dirty.csv` — **15 records** (theo log run), nhiều lỗi cố ý (duplicate, unknown source, stale version, empty text, date format inconsistency).
 
 **Tóm tắt luồng:**
 
@@ -49,19 +49,17 @@ python etl_pipeline.py freshness --manifest artifacts/manifests/manifest_day10-c
 
 ## 2. Cleaning & expectation (~200 từ)
 
-> Baseline có nhiều rules. Nhóm thêm **3 rule mới + 2 expectation mới**. E7 là **halt**, E8 là **warn**.
+> Baseline có nhiều rules. Nhóm thêm **3 rule mới**; đồng thời có expectation suite để halt/warn (xem log `expectation[...]`).
 
 ### 2a. Bảng metric_impact (bắt buộc — chống trivial)
 
 | Rule / Expectation mới (tên ngắn) | Metric | Trước (inject bad) | Sau (pipeline chuẩn) | Chứng cứ |
 |-----------------------------------|--------|-------------------|---------------------|----------|
-| `no_bom_encoding` (rule) | `quarantine_bom_encoding` | 0 (BOM không có trong CSV hiện tại) | 0 | Sẽ trigger khi CSV có BOM — test khả năng phòng thủ |
-| `no_excessive_whitespace` (rule) | `cleaned_excessive_whitespace_fixed` | 0 | 0 | Normalize whitespace thừa; CSV hiện tại không trigger |
-| `exported_at_not_future` (rule) | `quarantine_future_exported_at` | 0 | 0 | Sẽ trigger nếu exported_at > now+1h |
-| E7: `no_bom_control_chars` (halt) | expectation result | N/A (skip validate) | OK | Verify cleaned data sạch BOM |
-| E8: `cleaned_ratio_above_50pct` (warn) | cleaned/raw ratio | N/A | OK (ratio ~44%) | Cảnh báo nếu <50% — CSV mẫu gần ngưỡng |
+| `refund_window_fix` (rule) | `cleaned_refund_window_fixed` | 0 | 1 | `artifacts/logs/run_inject-bad.log`, `artifacts/logs/run_good.log` |
+| `refund_no_stale_14d_window` (expectation) | `violations` | 1 (FAIL, skipped) | 0 (OK) | `artifacts/logs/run_inject-bad.log`, `artifacts/logs/run_good.log` |
+| Retrieval cleanliness | `hits_forbidden` (q_refund_window) | **yes** | **no** | `artifacts/eval/after_inject_bad.csv` vs `artifacts/eval/before_after_eval.csv` |
 
-> **Note:** 3 rules mới là **phòng thủ** — CSV mẫu hiện tại không có BOM hay future timestamp, nhưng production CSV thường gặp. Metric sẽ thay đổi khi inject BOM/future data. Rule `no_excessive_whitespace` normalize chunk_text trước dedup, tránh duplicate vectors do whitespace khác nhau.
+> **Note:** Một số rule “phòng thủ” (BOM/control chars, future exported_at, excessive whitespace) có thể không trigger trên CSV mẫu hiện tại; nhóm sẽ mô tả thêm kịch bản inject tương ứng nếu cần.
 
 **Ví dụ expectation fail:** E3 `refund_no_stale_14d_window` FAIL khi inject `--no-refund-fix` → chunk "14 ngày" còn trong cleaned → halt pipeline (trừ khi `--skip-validate`).
 
@@ -77,10 +75,9 @@ Chạy `python etl_pipeline.py run --no-refund-fix --skip-validate` → chunk st
 
 | Metric | Inject bad | Pipeline chuẩn | Delta |
 |--------|-----------|---------------|-------|
-| quarantine_stale_refund_window | 0 | 1 | +1 |
 | expectation E3 (halt) | FAIL (skipped) | OK | Fixed |
 | hits_forbidden (q_refund_window) | **yes** | **no** | ✅ |
-| embed_prune_removed | 0 | ≥1 | Prune stale |
+| cleaned_refund_window_fixed (metric) | 0 | 1 | Auto-fix bật trong pipeline chuẩn |
 | contains_expected (q_refund_window) | yes | yes | — |
 
 > Chứng cứ: `artifacts/eval/before_after_eval.csv` (sau khi chạy `eval_retrieval.py`)
