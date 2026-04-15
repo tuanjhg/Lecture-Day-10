@@ -2,7 +2,7 @@
 
 **Họ và tên:** Nguyễn Hoàng Long  
 **Mã học viên:** 2A202600160  
-**Vai trò:** Quality & Observability Owner (cùng team với Hải)  
+**Vai trò:** Quality & Observability Owner
 **Ngày nộp:** 2026-04-15  
 **Độ dài yêu cầu:** **400–650 từ**
 
