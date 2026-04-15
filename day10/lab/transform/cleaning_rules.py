@@ -1,16 +1,21 @@
 """
 Cleaning rules — raw export → cleaned rows + quarantine.
 
-Integrated from contracts/data_contract.yaml:
+Integrated from contracts/data_contract.yaml v2.0:
   • Schema validation (min_length 8, required fields)
   • Quality rules (no_duplicate_chunk_id, no_stale_refund_window, etc.)
   • Version resolution (keep newest by effective_date, then exported_at)
   • Freshness & canonical sources (from canonical_sources list)
 
-Metrics tracking :
+Metrics tracking:
   - Each rule logs count of records affected (quarantined, dropped, fixed)
   - Halt conditions: stale_refund_window (if apply_refund_window_fix=True)
   - Dedup by chunk_id + exported_at (prefer latest version)
+
+New rules (Sprint 2 — Long & Hải):
+  • no_bom_encoding: BOM/control chars → quarantine
+  • no_excessive_whitespace: >3 spaces → normalize
+  • exported_at_not_future: future timestamps → quarantine
 """
 
 from __future__ import annotations
@@ -18,7 +23,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -92,6 +97,60 @@ def load_raw_csv(path: Path) -> List[Dict[str, str]]:
     return rows
 
 
+# ── New rule helpers (Sprint 2 — Long) ────────────────────────
+
+# BOM and control character pattern (contract rule: no_bom_encoding)
+_BOM_CONTROL_PATTERN = re.compile(
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]"  # C0 control chars (except \t \n \r)
+    r"|\xef\xbb\xbf"                         # UTF-8 BOM
+)
+
+# Excessive whitespace pattern (contract rule: no_excessive_whitespace)
+_EXCESSIVE_WHITESPACE = re.compile(r"[ \t]{4,}|\n{3,}")
+
+
+def _has_bom_or_control(text: str) -> bool:
+    """Check if text contains BOM or control characters (contract: no_bom_encoding)."""
+    return bool(_BOM_CONTROL_PATTERN.search(text))
+
+
+def _normalize_whitespace(text: str) -> tuple[str, bool]:
+    """
+    Normalize excessive whitespace in chunk_text (contract: no_excessive_whitespace).
+    Returns (normalized_text, was_modified).
+    """
+    original = text
+    # Collapse >3 consecutive spaces/tabs into single space
+    text = re.sub(r"[ \t]{4,}", " ", text)
+    # Collapse >2 consecutive newlines into double newline
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    # Final trim
+    text = text.strip()
+    return text, text != original
+
+
+def _is_future_timestamp(exported_at: str, tolerance_hours: float = 1.0) -> bool:
+    """
+    Check if exported_at is in the future (contract: exported_at_not_future).
+    Allows tolerance_hours grace for minor clock skew.
+    """
+    if not exported_at:
+        return False
+    try:
+        ts = exported_at.strip()
+        if ts.endswith("Z"):
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        else:
+            dt = datetime.fromisoformat(ts)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        diff_hours = (dt - now).total_seconds() / 3600.0
+        return diff_hours > tolerance_hours
+    except (ValueError, TypeError):
+        return False
+
+
 class CleaningMetrics:
     """Track impact of each quality rule for anti-trivial verification."""
 
@@ -104,7 +163,11 @@ class CleaningMetrics:
             "quarantine_stale_hr_policy": 0,
             "quarantine_short_chunk_text": 0,
             "quarantine_empty_chunk_text": 0,
-            "quarantine_stale_refund_window": 0,
+            "stale_refund_window_detected": 0,
+            # New rules (Sprint 2 — Long)
+            "quarantine_bom_encoding": 0,
+            "quarantine_future_exported_at": 0,
+            "cleaned_excessive_whitespace_fixed": 0,
             "dropped_duplicate_chunk_id": 0,
             "dropped_duplicate_chunk_text": 0,
             "cleaned_refund_window_fixed": 0,
@@ -116,6 +179,9 @@ class CleaningMetrics:
         """Increment metric."""
         if key in self.metrics:
             self.metrics[key] += count
+        else:
+            # Auto-register new metrics
+            self.metrics[key] = count
 
     def to_dict(self) -> Dict[str, Any]:
         d = {k: v for k, v in self.metrics.items() if v > 0}
@@ -141,7 +207,8 @@ def clean_rows(
     7. Duplicate chunk_text (semantic): drop excess (warn severity)
 
     If apply_refund_window_fix=True: also fix "14 ngày" → "7 ngày" for cleaned records.
-    If stale refund detected: return metrics with has_stale_refund=True for halt decision in pipeline.
+    If stale refund detected AND apply_refund_window_fix=False: return metrics with has_stale_refund=True
+    so the pipeline can decide to halt (or run in demo mode).
 
     Returns: (cleaned, quarantine, metrics)
     """
@@ -219,32 +286,58 @@ def clean_rows(
             quarantine.append({**raw, "reason": "insufficient_chunk_text_length"})
             continue
 
-        # Rule: stale refund window (halt!)
-        # Per contract:: quality_rules.no_stale_refund_window.severity = "halt"
-        # If chunk contains "14 ngày làm việc" (from v3 migration) → QUARANTINE + MARK HALT
-        if doc_id == "policy_refund_v4" and "14 ngày" in text:
-            metrics.record("quarantine_stale_refund_window")
-            metrics.has_stale_refund = True
-            quarantine.append({**raw, "reason": "stale_refund_window_v3"})
+        # ── New Rule (Sprint 2 — Long): BOM / control character detection ──
+        # Per contract v2.0:: quality_rules.no_bom_encoding.severity = "error"
+        # BOM (\xef\xbb\xbf) gây lỗi embedding distance; control chars gây parse error
+        if _has_bom_or_control(text):
+            metrics.record("quarantine_bom_encoding")
+            quarantine.append({**raw, "reason": "bom_or_control_chars_detected"})
             continue
+
+        # ── New Rule (Sprint 2 — Long): Future exported_at detection ──
+        # Per contract v2.0:: quality_rules.exported_at_not_future.severity = "error"
+        # exported_at in the future indicates data tampering or clock drift
+        if _is_future_timestamp(exported_at):
+            metrics.record("quarantine_future_exported_at")
+            quarantine.append({**raw, "reason": "exported_at_is_future"})
+            continue
+
+        # Start from (potentially) cleaned text, then apply policy fixes.
+        fixed_text = text
+
+        # ── New Rule (Sprint 2 — Long): Excessive whitespace normalization ──
+        # Per contract v2.0:: quality_rules.no_excessive_whitespace.severity = "warn"
+        # Whitespace thừa làm embedding distance bị lệch
+        fixed_text, ws_fixed = _normalize_whitespace(fixed_text)
+        if ws_fixed:
+            metrics.record("cleaned_excessive_whitespace_fixed")
+
+        # Rule: stale refund window (supports both normal & demo mode)
+        #
+        # Normal mode (apply_refund_window_fix=True):
+        #   - Fix 14→7 and keep in cleaned so Sprint 2 can embed a correct index.
+        #
+        # Demo mode (apply_refund_window_fix=False, used with --no-refund-fix):
+        #   - Keep "14 ngày" so expectations/eval can observe a failure scenario (Sprint 3).
+        if doc_id == "policy_refund_v4" and "14 ngày" in fixed_text:
+            metrics.record("stale_refund_window_detected")
+            if apply_refund_window_fix:
+                fixed_text = (
+                    fixed_text.replace("14 ngày làm việc", "7 ngày làm việc")
+                    .replace("14 ngày", "7 ngày")
+                    + " [cleaned: stale_refund_window_fixed]"
+                )
+                metrics.record("cleaned_refund_window_fixed")
+            else:
+                metrics.has_stale_refund = True
 
         # Rule: duplicate chunk_text (warn)
         # Per contract:: rule = "keep first occurrence; DROP others"
-        key = _norm_text(text)
+        key = _norm_text(fixed_text)
         if key in seen_text:
             metrics.record("dropped_duplicate_chunk_text")
             continue
         seen_text.add(key)
-
-        # Fix refund window if enabled & allowed
-        # (Apply only to cleaned records, not quarantine)
-        fixed_text = text
-        if apply_refund_window_fix and doc_id == "policy_refund_v4":
-            if "14 ngày" in fixed_text:
-                # This shouldn't happen after quarantine rule above, but defensive coding
-                fixed_text = fixed_text.replace("14 ngày làm việc", "7 ngày làm việc")
-                fixed_text += " [cleaned: stale_refund_window_fixed]"
-                metrics.record("cleaned_refund_window_fixed")
 
         seq += 1
         cleaned.append(
