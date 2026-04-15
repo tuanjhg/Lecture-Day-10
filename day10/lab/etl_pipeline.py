@@ -90,7 +90,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         log("PIPELINE_HALT: stale refund window (14 ngày) detected in policy_refund_v4 — fix required (--no-refund-fix for demo only).")
         return 2
     if has_stale_refund and args.no_refund_fix:
-        log("WARN: stale refund window detected but --no-refund-fix → proceed (demo mode for before/after eval).")
+        log("WARN: stale refund window detected but --no-refund-fix -> proceed (demo mode for before/after eval).")
 
     results, halt = run_expectations(cleaned, raw_count=raw_count)
     for r in results:
