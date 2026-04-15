@@ -57,8 +57,6 @@ Hệ thống xử lý dữ liệu tin cậy cho Agent với 7 thành viên.
 |------------|-----------------|----------|
 | **Long** | Hoàn thiện `freshness_check.py` và viết `runbook.md`. | Monitor & Runbook |
 | **Hải** | Hoàn thiện `quality_report.md` với các diễn giải về số liệu. | Quality Report |
-| **Huy** | Phân tích sâu kết quả `hits_forbidden` và `top1_doc_expected`. | Performance Analyst |
-| **Quang/Tuấn** | Hoàn thiện báo cáo cá nhân, tập trung vào phần Transformation. | Individual Reports |
 | **Thuận** | Chạy thử pipeline lần cuối (Rerun test) để confirm 0% duplicate. | Final DB Proof |
 | **Dũng** | Tổng hợp `group_report.md` và kiểm tra `requirements.txt`. | Final Package |
 
