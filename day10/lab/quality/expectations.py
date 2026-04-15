@@ -2,6 +2,10 @@
 Expectation suite đơn giản (không bắt buộc Great Expectations).
 
 Sinh viên có thể thay bằng GE / pydantic / custom — miễn là có halt có kiểm soát.
+
+New expectations (Sprint 2 — Long & Hải):
+  • E7: no_bom_control_chars — BOM/control chars in cleaned → halt
+  • E8: cleaned_ratio_above_50pct — cleaned/raw ratio check → warn
 """
 
 from __future__ import annotations
@@ -19,11 +23,14 @@ class ExpectationResult:
     detail: str
 
 
-def run_expectations(cleaned_rows: List[Dict[str, Any]]) -> Tuple[List[ExpectationResult], bool]:
+def run_expectations(cleaned_rows: List[Dict[str, Any]], **kwargs) -> Tuple[List[ExpectationResult], bool]:
     """
     Trả về (results, should_halt).
 
     should_halt = True nếu có bất kỳ expectation severity halt nào fail.
+
+    kwargs:
+        raw_count (int): số records raw ban đầu — dùng cho E8 (cleaned ratio check).
     """
     results: List[ExpectationResult] = []
 
@@ -156,6 +163,44 @@ def run_expectations(cleaned_rows: List[Dict[str, Any]]) -> Tuple[List[Expectati
             f"empty_chunk_count={len(empty_content)}",
         )
     )
+
+    # ── New Expectations (Sprint 2 — Long) ──────────────────────
+
+    # E7: không còn BOM hoặc control characters trong cleaned data
+    # Per contract v2.0:: quality_rules.no_bom_encoding
+    # BOM/control chars gây lỗi embedding distance; nếu tồn tại sau clean = cleaning rules bị bypass
+    import re as _re
+    _bom_ctrl = _re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]|\xef\xbb\xbf")
+    bad_encoding = [
+        r
+        for r in cleaned_rows
+        if _bom_ctrl.search(r.get("chunk_text") or "")
+    ]
+    ok7 = len(bad_encoding) == 0
+    results.append(
+        ExpectationResult(
+            "no_bom_control_chars",
+            ok7,
+            "halt",
+            f"bom_control_chars_found={len(bad_encoding)}",
+        )
+    )
+
+    # E8: tỷ lệ cleaned/raw hợp lý (> 50%)
+    # Per contract v2.0:: monitoring.key_metrics.cleaned_vs_raw_ratio
+    # Nếu quá nhiều records bị drop/quarantine → data quality issue nghiêm trọng
+    raw_count = kwargs.get("raw_count", 0) if kwargs else 0
+    if raw_count > 0:
+        ratio = len(cleaned_rows) / raw_count
+        ok8 = ratio >= 0.5
+        results.append(
+            ExpectationResult(
+                "cleaned_ratio_above_50pct",
+                ok8,
+                "warn",
+                f"cleaned={len(cleaned_rows)} raw={raw_count} ratio={ratio:.2%}",
+            )
+        )
 
     halt = any(not r.passed and r.severity == "halt" for r in results)
     return results, halt

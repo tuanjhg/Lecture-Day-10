@@ -92,7 +92,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if has_stale_refund and args.no_refund_fix:
         log("WARN: stale refund window detected but --no-refund-fix -> proceed (demo mode for before/after eval).")
 
-    results, halt = run_expectations(cleaned)
+    results, halt = run_expectations(cleaned, raw_count=raw_count)
     for r in results:
         sym = "OK" if r.passed else "FAIL"
         log(f"expectation[{r.name}] {sym} ({r.severity}) :: {r.detail}")
