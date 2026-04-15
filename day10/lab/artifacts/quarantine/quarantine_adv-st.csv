@@ -1,0 +1,4 @@
+chunk_id,doc_id,chunk_text,effective_date,exported_at,reason
+st_adv_01,policy_refund_v4,Chính sách v4: Hoàn tiền trong 14 ngày. (Lỗi logic: v4 thực tế chỉ 7 ngày),2026-02-01,2026-04-15T10:00:00,stale_refund_window_v3
+st_adv_05,policy_refund_V4,Sai Case-sensitivity: policy_refund_V4 (viết hoa chữ V).,2026-02-01,2026-04-15T10:00:00,unknown_doc_id
+st_adv_10,unknown_doc,Dữ liệu nằm ngoài danh mục cho phép.,2026-04-15,2026-04-15T10:00:00,unknown_doc_id

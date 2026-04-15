@@ -1,0 +1,15 @@
+{
+  "run_id": "adv-stress",
+  "run_timestamp": "2026-04-15T09:26:32.371082+00:00",
+  "raw_path": "lab\\data\\raw\\policy_stress_test.csv",
+  "raw_records": 8,
+  "cleaned_records": 6,
+  "quarantine_records": 1,
+  "latest_exported_at": "2026-04-15T10:00:00",
+  "no_refund_fix": false,
+  "skipped_validate": false,
+  "cleaned_csv": "artifacts\\cleaned\\cleaned_adv-stress.csv",
+  "quarantine_csv": "artifacts\\quarantine\\quarantine_adv-stress.csv",
+  "chroma_path": "./chroma_db",
+  "chroma_collection": "day10_kb"
+}
