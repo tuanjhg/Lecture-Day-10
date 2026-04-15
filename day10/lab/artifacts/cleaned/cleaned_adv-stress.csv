@@ -1,0 +1,8 @@
+chunk_id,doc_id,chunk_text,effective_date,exported_at
+policy_refund_v4_1_8fc9b0afe8a91ef1,policy_refund_v4,Chính sách v4: Hoàn tiền trong 7 ngày.,2026-02-01,2026-04-15T09:00:00
+hr_leave_policy_2_55ab43b2cbf88a98,hr_leave_policy,Liên hệ nhân sự qua số 090-123-4567 hoặc admin@company.com để nghỉ phép.,2026-01-01,2026-04-15T10:00:00
+sla_p1_2026_3_43eff44791cac040,sla_p1_2026,"Ticket P1 xử lý trong 4 giờ.	 	
+(Chứa Tab, Newline và Zero-width space để phá Tokenizer)",2026-01-15,2026-04-15T10:00:00
+it_helpdesk_faq_4_e44357b88b154478,it_helpdesk_faq,Mật khẩu reset tại portal. 🔑 🛡️ 🔴 (Chứa quá nhiều Emojis gây nhiễu embedding),2026-01-20,2026-04-15T10:00:00
+hr_leave_policy_5_414816e51c272fca,hr_leave_policy,Nhân viên có 12 ngày phép.,2026-01-01,2026-01-01T00:00:00
+sla_p1_2026_6_3970251682000933,sla_p1_2026,SLA P1 là -1 giờ. (Giá trị âm vô lý),2026-01-15,2026-04-15T10:00:00
