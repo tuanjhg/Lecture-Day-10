@@ -143,6 +143,19 @@ def run_expectations(cleaned_rows: List[Dict[str, Any]]) -> Tuple[List[Expectati
             f"violations={len(bad_hr_annual)}",
         )
     )
+    
+    # E9: chunk_text không được rỗng (Content rỗng -> REJECT)
+    # Đây là chốt chặn đảm bảo core logic không xử lý các document vô giá trị.
+    empty_content = [r for r in cleaned_rows if not (r.get("chunk_text") or "").strip()]
+    ok9 = len(empty_content) == 0
+    results.append(
+        ExpectationResult(
+            "no_empty_chunk_text",
+            ok9,
+            "halt",
+            f"empty_chunk_count={len(empty_content)}",
+        )
+    )
 
     halt = any(not r.passed and r.severity == "halt" for r in results)
     return results, halt
