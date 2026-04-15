@@ -9,7 +9,7 @@
 | Quang | Transformation (Cleaning) | ___ |
 | Hải | Quality & Observability | ___ |
 | Nguyễn Hoàng Long | Quality & Observability (Contract, Freshness, Docs) | 2A202600160 |
-| Thuận | Vector DB (Embed/Prune) | ___ |
+| Thuận | Vector DB (Embed/Prune) | 2A202600058 |
 | Huy | Evaluation | ___ |
 
 **Ngày nộp:** 2026-04-15  
