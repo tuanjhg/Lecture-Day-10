@@ -104,7 +104,7 @@ class CleaningMetrics:
             "quarantine_stale_hr_policy": 0,
             "quarantine_short_chunk_text": 0,
             "quarantine_empty_chunk_text": 0,
-            "quarantine_stale_refund_window": 0,
+            "stale_refund_window_detected": 0,
             "dropped_duplicate_chunk_id": 0,
             "dropped_duplicate_chunk_text": 0,
             "cleaned_refund_window_fixed": 0,
@@ -141,7 +141,8 @@ def clean_rows(
     7. Duplicate chunk_text (semantic): drop excess (warn severity)
 
     If apply_refund_window_fix=True: also fix "14 ngày" → "7 ngày" for cleaned records.
-    If stale refund detected: return metrics with has_stale_refund=True for halt decision in pipeline.
+    If stale refund detected AND apply_refund_window_fix=False: return metrics with has_stale_refund=True
+    so the pipeline can decide to halt (or run in demo mode).
 
     Returns: (cleaned, quarantine, metrics)
     """
@@ -219,32 +220,33 @@ def clean_rows(
             quarantine.append({**raw, "reason": "insufficient_chunk_text_length"})
             continue
 
-        # Rule: stale refund window (halt!)
-        # Per contract:: quality_rules.no_stale_refund_window.severity = "halt"
-        # If chunk contains "14 ngày làm việc" (from v3 migration) → QUARANTINE + MARK HALT
-        if doc_id == "policy_refund_v4" and "14 ngày" in text:
-            metrics.record("quarantine_stale_refund_window")
-            metrics.has_stale_refund = True
-            quarantine.append({**raw, "reason": "stale_refund_window_v3"})
-            continue
+        # Rule: stale refund window (supports both normal & demo mode)
+        #
+        # Normal mode (apply_refund_window_fix=True):
+        #   - Fix 14→7 and keep in cleaned so Sprint 2 can embed a correct index.
+        #
+        # Demo mode (apply_refund_window_fix=False, used with --no-refund-fix):
+        #   - Keep "14 ngày" so expectations/eval can observe a failure scenario (Sprint 3).
+        fixed_text = text
+        if doc_id == "policy_refund_v4" and "14 ngày" in fixed_text:
+            metrics.record("stale_refund_window_detected")
+            if apply_refund_window_fix:
+                fixed_text = (
+                    fixed_text.replace("14 ngày làm việc", "7 ngày làm việc")
+                    .replace("14 ngày", "7 ngày")
+                    + " [cleaned: stale_refund_window_fixed]"
+                )
+                metrics.record("cleaned_refund_window_fixed")
+            else:
+                metrics.has_stale_refund = True
 
         # Rule: duplicate chunk_text (warn)
         # Per contract:: rule = "keep first occurrence; DROP others"
-        key = _norm_text(text)
+        key = _norm_text(fixed_text)
         if key in seen_text:
             metrics.record("dropped_duplicate_chunk_text")
             continue
         seen_text.add(key)
-
-        # Fix refund window if enabled & allowed
-        # (Apply only to cleaned records, not quarantine)
-        fixed_text = text
-        if apply_refund_window_fix and doc_id == "policy_refund_v4":
-            if "14 ngày" in fixed_text:
-                # This shouldn't happen after quarantine rule above, but defensive coding
-                fixed_text = fixed_text.replace("14 ngày làm việc", "7 ngày làm việc")
-                fixed_text += " [cleaned: stale_refund_window_fixed]"
-                metrics.record("cleaned_refund_window_fixed")
 
         seq += 1
         cleaned.append(
